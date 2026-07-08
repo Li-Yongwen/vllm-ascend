@@ -1202,14 +1202,17 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
-                param = params_dict[name]
-                if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
-                else:
-                    # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
-                loaded_params.add(name)
+                try:
+                    param = params_dict[name]
+                    if enable_dsa_cp():
+                        param.data.copy_(loaded_weight)
+                    else:
+                        # Handle attention sinks (distributed across ranks)
+                        narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                        param.data.copy_(narrow_weight)
+                    loaded_params.add(name)
+                except Exception as e:
+                    print(f"{name} 发生错误: {e}")
                 continue
 
             is_fusion_moe_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
@@ -1243,10 +1246,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
                 if is_pp_missing_parameter(name, self):
                     continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                try:
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                except Exception as e:
+                    print(f"{name} 发生错误: {e}")
                 break
             else:
                 is_expert_weight = False
@@ -1306,26 +1311,28 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
-
-                        param = params_dict[name_mapped]
-                        # We should ask the weight loader to return success or
-                        # not here since otherwise we may skip experts with
-                        # other available replicas.
-                        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-                        success = weight_loader(
-                            param,
-                            weight_to_load,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
-                        if success:
-                            if not is_fusion_moe_shared_experts_layer:
-                                name = name_mapped
-                            else:
-                                loaded_params.add(name_mapped)
-                            break
+                        try:
+                            param = params_dict[name_mapped]
+                            # We should ask the weight loader to return success or
+                            # not here since otherwise we may skip experts with
+                            # other available replicas.
+                            weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+                            success = weight_loader(
+                                param,
+                                weight_to_load,
+                                name_mapped,
+                                shard_id=shard_id,
+                                expert_id=expert_id,
+                                return_success=True,
+                            )
+                            if success:
+                                if not is_fusion_moe_shared_experts_layer:
+                                    name = name_mapped
+                                else:
+                                    loaded_params.add(name_mapped)
+                                break
+                        except Exception as e:
+                            print(f"{name} 发生错误: {e}")
                     else:
                         if is_expert_weight:
                             # We've checked that this is an expert weight
@@ -1345,9 +1352,23 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                         if is_pp_missing_parameter(name, self):
                             continue
 
-                        param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                        weight_loader(param, loaded_weight)
+                        # skip error
+                        try:
+                            param = params_dict[name]
+
+                            if "wo_a" in name and len(param.shape) == 3:
+                                n_local_groups = param.shape[0]
+                                o_lora_rank = param.shape[2]
+                                hidden = param.shape[1]
+                                param.data = param.data.transpose(2, 1).contiguous().view(n_local_groups * o_lora_rank,  hidden)
+
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            weight_loader(param, loaded_weight)
+
+                        except Exception as e:
+                            print(f"{name} 发生错误: {e}")
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
