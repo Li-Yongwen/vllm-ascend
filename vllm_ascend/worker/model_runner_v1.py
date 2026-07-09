@@ -2247,13 +2247,6 @@ class NPUModelRunner(GPUModelRunner):
                 capturer = AscendRoutedExpertsCapturer.get_instance()
                 if capturer is not None:
                     token_positions = getattr(self, 'cpu_positions', None)
-                    logger.info(
-                        "[DEBUG model_runner save] cpu_slot_mapping[:5]=%s "
-                        "cpu_positions=%s compress_ratio=%s",
-                        self.cpu_slot_mapping[:5] if hasattr(self, 'cpu_slot_mapping') and self.cpu_slot_mapping is not None else 'N/A',
-                        token_positions[:5] if token_positions is not None else 'None',
-                        getattr(capturer, 'compress_ratio', 'N/A'),
-                    )
                     capturer.save_captured_experts(indices=self.cpu_slot_mapping, token_positions=token_positions)
             elif self.routed_experts_initialized:
                 buf = self.routed_experts_capturer.get_device_buffer()
@@ -2844,9 +2837,9 @@ class NPUModelRunner(GPUModelRunner):
                             kv_slots = block_numbers * (block_size * 4) + offsets
                             self.cpu_slot_mapping = kv_slots
                         else:
-                            self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                            self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
                     else:
-                        self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                        self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
                 elif self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
