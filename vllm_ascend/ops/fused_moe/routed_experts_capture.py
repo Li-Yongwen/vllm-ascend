@@ -1,4 +1,5 @@
 import math
+import logging
 
 import torch
 from vllm.distributed import tensor_model_parallel_all_gather
@@ -11,6 +12,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
@@ -80,3 +83,13 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
             return
 
         self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[start_loc:end_loc, :]
+
+        # DEBUG: log first capture per forward pass (layer 0 only)
+        if layer_id == 0:
+            snippet = topk_ids[start_loc:start_loc+3, :].cpu().numpy()
+            logger.info(
+                "[DEBUG capture] layer=%d token_num_per_dp=%d "
+                "topk_ids[:3]=%s device_buf_nonzero=%s",
+                layer_id, token_num_per_dp, snippet,
+                (self._device_buffer[:token_num_per_dp, layer_id, :] != 0).any().item(),
+            )
