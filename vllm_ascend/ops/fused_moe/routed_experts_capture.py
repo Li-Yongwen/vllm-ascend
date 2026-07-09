@@ -85,11 +85,12 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[start_loc:end_loc, :]
 
         # DEBUG: log first capture per forward pass (layer 0 only)
+        # NOTE: avoid .cpu() / .numpy() here — NPU graph capture mode
+        # forbids host-device sync.  Only log shape / dtype info.
         if layer_id == 0:
-            snippet = topk_ids[start_loc:start_loc+3, :].cpu().numpy()
             logger.info(
                 "[DEBUG capture] layer=%d token_num_per_dp=%d "
-                "topk_ids[:3]=%s device_buf_nonzero=%s",
-                layer_id, token_num_per_dp, snippet,
-                (self._device_buffer[:token_num_per_dp, layer_id, :] != 0).any().item(),
+                "topk_ids_shape=%s topk_ids_dtype=%s",
+                layer_id, token_num_per_dp,
+                topk_ids.shape, topk_ids.dtype,
             )
