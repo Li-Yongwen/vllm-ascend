@@ -230,6 +230,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             )
         assert topk_ids is not None
         assert topk_weights is not None
+
+        if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
+            from vllm_ascend.ops.fused_moe.routed_experts_capture import AscendRoutedExpertsCapturer
+            capturer = AscendRoutedExpertsCapturer.get_instance()
+            if capturer is not None:
+                capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
+
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
