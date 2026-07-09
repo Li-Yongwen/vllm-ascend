@@ -161,6 +161,9 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    _get_compress_ratio,
+)
 from vllm_ascend.ops.fused_moe.routed_experts_capture import (
     AscendRoutedExpertsCapturer,
 )
@@ -2937,7 +2940,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
-                compress_ratio = getattr(attn_group.kv_cache_spec, "compress_ratio", 1)
+                compress_ratio = _get_compress_ratio(attn_group.kv_cache_spec)
                 if for_cudagraph_capture:
                     extra_attn_metadata_args = dict(
                         compress_ratio=compress_ratio,
@@ -3532,9 +3535,8 @@ class NPUModelRunner(GPUModelRunner):
             if pcp_size * dcp_size > 1:
                 self.max_num_kv_tokens *= pcp_size * dcp_size
 
-            attn_compress_ratio = getattr(
-                self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid].kv_cache_spec,
-                'compress_ratio', 1)
+            attn_compress_ratio = _get_compress_ratio(
+                self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid].kv_cache_spec)
             routed_experts_capturer.init_buffer(
                 max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
                 max_num_kv_tokens=self.max_num_kv_tokens,
