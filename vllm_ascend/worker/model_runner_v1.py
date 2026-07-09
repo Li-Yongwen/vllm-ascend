@@ -161,7 +161,9 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
+from vllm_ascend.ops.fused_moe.routed_experts_capture import (
+    AscendRoutedExpertsCapturer,
+)
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
@@ -708,6 +710,10 @@ class NPUModelRunner(GPUModelRunner):
             self.query_pos.np[: cu_num_tokens[-1]],
             out=positions_np,
         )
+
+        if self.model_config.enable_return_routed_experts and vllm_version_is("0.20.2"):
+            self._prepare_positions_np = positions_np
+            self._prepare_req_indices = req_indices
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP
@@ -1669,7 +1675,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
-                capturer = RoutedExpertsCapturer.get_instance()
+                capturer = AscendRoutedExpertsCapturer.get_instance()
                 if capturer is not None:
                     capturer.clear_buffer()
             elif self.routed_experts_initialized:
@@ -2235,9 +2241,10 @@ class NPUModelRunner(GPUModelRunner):
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
-                capturer = RoutedExpertsCapturer.get_instance()
+                capturer = AscendRoutedExpertsCapturer.get_instance()
                 if capturer is not None:
-                    capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+                    token_positions = getattr(self, 'cpu_positions', None)
+                    capturer.save_captured_experts(indices=self.cpu_slot_mapping, token_positions=token_positions)
             elif self.routed_experts_initialized:
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
@@ -2806,7 +2813,31 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                 if vllm_version_is("0.20.2"):
-                    self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                    attn_compress_ratio = getattr(
+                        self.kv_cache_config.kv_cache_groups[kv_cache_gid].kv_cache_spec,
+                        'compress_ratio', 1)
+                    if attn_compress_ratio > 1:
+                        blk_table = self.input_batch.block_table[kv_cache_gid]
+                        block_size = blk_table.block_size
+                        positions_np = getattr(self, '_prepare_positions_np', None)
+                        prepare_req_indices = getattr(self, '_prepare_req_indices', None)
+                        if positions_np is not None and prepare_req_indices is not None:
+                            token_positions = positions_np[:num_tokens]
+                            logical_block_idx = token_positions // (block_size * 4)
+                            max_blocks = blk_table.max_num_blocks_per_req
+                            blocks_per_phys = blk_table.blocks_per_phys_block
+                            block_table_np = blk_table.block_table.np
+                            block_table_indices = (prepare_req_indices * max_blocks * blocks_per_phys
+                                                   + logical_block_idx)
+                            block_numbers = block_table_np.ravel()[block_table_indices]
+                            offsets = token_positions % (block_size * 4)
+                            kv_slots = block_numbers * (block_size * 4) + offsets
+                            self.cpu_slot_mapping = kv_slots
+                        else:
+                            self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                    else:
+                        self.cpu_slot_mapping = slot_mapping.cpu().numpy()
+                    self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
                 elif self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
                     # buffer so the next ``_prepare_inputs`` does not
@@ -3480,15 +3511,51 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
+    def init_routed_experts_capturer(self):
+        logger.info(
+            "Initializing routed experts capturer (Ascend), "
+            "enable_return_routed_experts: %s",
+            self.model_config.enable_return_routed_experts,
+        )
+        if vllm_version_is("0.20.2"):
+            routed_experts_capturer = AscendRoutedExpertsCapturer.create()
+            self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+            attn_block_size = self.kv_cache_config.kv_cache_groups[
+                self.routed_experts_attn_gid
+            ].kv_cache_spec.block_size
+            self.max_num_kv_tokens = (
+                self.kv_cache_config.num_blocks * attn_block_size
+            )
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+            if pcp_size * dcp_size > 1:
+                self.max_num_kv_tokens *= pcp_size * dcp_size
+
+            attn_compress_ratio = getattr(
+                self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid].kv_cache_spec,
+                'compress_ratio', 1)
+            routed_experts_capturer.init_buffer(
+                max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+                max_num_kv_tokens=self.max_num_kv_tokens,
+                vllm_config=self.vllm_config,
+                compress_ratio=attn_compress_ratio,
+            )
+            self.routed_experts_initialized = True
+        else:
+            # vLLM main path: delegate to parent which uses
+            # the upstream RoutedExpertsCapturer + BaseRouter hook,
+            # then bind the capturer for Ascend's select_experts.
+            super().init_routed_experts_capturer()
+
     def _bind_routed_experts_capturer(self, capturer) -> None:
         # Upstream binds via ``module.router.set_capture_fn(...)`` on
         # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
         # ``select_experts`` does not go through ``BaseRouter``, so the
         # upstream hook never fires. Instead, stash the capturer as a
         # plain attribute on every FusedMoE layer; ``apply()`` reads it
-        # back on the hot path. Only used on vLLM main (PR #39568+);
-        # the 0.20.2 path uses the ``RoutedExpertsCapturer.get_instance``
-        # singleton and never calls this method.
+        # back on the hot path.
+        # Only used on vLLM main (PR #39568+); the 0.20.2 path uses
+        # the ``AscendRoutedExpertsCapturer.get_instance`` singleton.
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
         for module in self.compilation_config.static_forward_context.values():

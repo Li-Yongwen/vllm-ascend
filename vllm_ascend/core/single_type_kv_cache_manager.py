@@ -40,8 +40,8 @@ class CompressAttentionManager(FullAttentionManager):
         # speculative decoding (MTP/EAGLE) with linear attention.
         # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
 
-        num_tokens //= self.compress_ratio
-        num_tokens_main_model //= self.compress_ratio
+        num_tokens = cdiv(num_tokens, self.compress_ratio)
+        num_tokens_main_model = cdiv(num_tokens_main_model, self.compress_ratio)
 
         return super().get_num_blocks_to_allocate(
             request_id,
@@ -85,7 +85,7 @@ class CompressAttentionManager(FullAttentionManager):
         req_blocks = self.req_to_blocks[request_id]
         assert len(req_blocks) == 0
         num_total_computed_tokens = num_local_computed_tokens + num_external_computed_tokens
-        num_total_computed_tokens //= self.compress_ratio
+        num_total_computed_tokens = cdiv(num_total_computed_tokens, self.compress_ratio)
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
@@ -135,9 +135,9 @@ class CompressAttentionManager(FullAttentionManager):
         Returns:
             The new allocated blocks.
         """
-        num_tokens //= self.compress_ratio
+        num_tokens = cdiv(num_tokens, self.compress_ratio)
         ## TODO: check spec decode
-        num_tokens_main_model //= self.compress_ratio
+        num_tokens_main_model = cdiv(num_tokens_main_model, self.compress_ratio)
 
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
@@ -158,7 +158,7 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
         """
-        num_tokens //= self.compress_ratio
+        num_tokens = cdiv(num_tokens, self.compress_ratio)
 
         return super().cache_blocks(request, num_tokens)
 
