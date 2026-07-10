@@ -2851,6 +2851,16 @@ class NPUModelRunner(GPUModelRunner):
                             block_numbers = blk_table.block_table.np.ravel()[block_table_indices]
                             offsets = token_positions % block_size
                             computed_slots = block_numbers * block_size + offsets
+                            # Debug: print computed slots for first few tokens of each request
+                            import sys
+                            for ri in range(min(3, self.input_batch.num_reqs)):
+                                mask = (req_row == ri)
+                                if mask.any():
+                                    print(f"[SLOT-COMPUTE] req_idx={ri} "
+                                          f"block_numbers={block_numbers[mask][:3]} "
+                                          f"computed={computed_slots[mask][:3]} "
+                                          f"orig={slot_mapping_cpu[mask][:3]}",
+                                          file=sys.stderr, flush=True)
                             # Merge: use slot_mapping where valid, computed_slots where -1
                             invalid_mask = slot_mapping_cpu < 0
                             self.cpu_slot_mapping = slot_mapping_cpu.copy()
