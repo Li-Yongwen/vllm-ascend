@@ -54,6 +54,12 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         In EP setups all TP(EP) ranks write to the same shared memory
         (dp_rank == 0).  Each rank saves only the tokens it captured.
         """
+        import sys
+        print(f"[SAVE] tp_rank={self.tp_rank} lock_file={self._lock_file is not None} "
+              f"host_buf={self._host_buffer_view is not None} "
+              f"dev_buf={self._device_buffer is not None} "
+              f"indices_len={len(indices) if indices is not None else 'None'}",
+              file=sys.stderr, flush=True)
         if self._lock_file is None:
             return
         if self._host_buffer_view is None:
@@ -74,14 +80,10 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if len(valid_indices) == 0:
             return
 
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(
-            "[routed_experts] save: tp_rank=%d num_tokens=%d valid=%d "
-            "indices[:3]=%s host_indices[:3]=%s data_nonzero=%s",
-            self.tp_rank, num_tokens, len(valid_indices),
-            indices[:3], valid_indices[:3], (valid_data != 0).any(),
-        )
+        print(f"[SAVE] tp_rank={self.tp_rank} num_tokens={num_tokens} valid={len(valid_indices)} "
+              f"indices[:3]={indices[:3]} valid_idx[:3]={valid_indices[:3]} "
+              f"data_nz={(valid_data != 0).any()}",
+              file=sys.stderr, flush=True)
 
         with _file_lock(self._lock_file):
             self._host_buffer_view[valid_indices, :, :] = valid_data
