@@ -717,7 +717,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts and vllm_version_is("0.20.2"):
             self._prepare_positions_np = positions_np
             self._prepare_req_indices = req_indices
-            self._token_counts_per_req = num_scheduled_tokens_np[:num_reqs].copy()
+            self._token_counts_per_req = num_scheduled_tokens[:num_reqs].copy()
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP
