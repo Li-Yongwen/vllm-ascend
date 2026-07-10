@@ -15,10 +15,11 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     """
     Capturer for routed experts with device and optional shared memory buffer.
 
-    In EP setups each TP(EP) rank has a *different* slot_mapping where only
-    its own tokens have valid (non-negative) slots.  Every rank saves its
-    own valid-slot data to the same shared memory so that all slots are
-    eventually covered.
+    In the Ascend EP implementation, gating runs *before* EP dispatch,
+    so every TP(EP) rank sees the full set of tokens and produces its
+    own topk_ids.  Only TP0 writes the data to shared memory using
+    KV-slot-based indexing.  The scheduler reads using the same
+    KV-slot calculation.
     """
 
     def __init__(self) -> None:
@@ -47,14 +48,13 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     def save_captured_experts(
         self,
         indices,  # np.ndarray
-        token_positions=None,  # np.ndarray | None
+        token_positions=None,  # np.ndarray | None -- ignored
     ) -> None:
         """Save captured experts from device buffer to shared memory.
 
-        Each TP(EP) rank writes only the slots whose index is >= 0 in its
-        ``cpu_slot_mapping``.  Because different EP ranks have different
-        valid slots, every slot is written by exactly one rank, and the
-        shared memory ends up with complete data.
+        Only TP0 performs the write.  Data is written using the KV-slot
+        indices passed in ``indices``.  The scheduler reads using the
+        same KV-slot calculation.
         """
         if self._lock_file is None:
             return
@@ -63,34 +63,24 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if self._device_buffer is None:
             return
 
-        num_tokens = len(indices)
+        # Only TP0 writes to avoid redundant / conflicting writes.
+        if self.tp_rank != 0:
+            return
 
+        num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
         import sys
-        print(f"[SAVE-ENTRY] tp_rank={self.tp_rank} num_tokens={num_tokens} "
-              f"indices[:3]={indices[:3]} num_valid={np.sum(indices >= 0)} "
-              f"data[:2,0,:3]={data[:2, 0, :3]}",
+        print(f"[SAVE] num_tokens={num_tokens} num_valid={np.sum(indices >= 0)} "
+              f"indices[:5]={indices[:5]} data[:2,0,:3]={data[:2, 0, :3]}",
               file=sys.stderr, flush=True)
 
-        host_indices = indices
-
-        # Skip slots with -1 (tokens that belong to other EP ranks).
-        valid_mask = host_indices >= 0
-        valid_indices = host_indices[valid_mask]
+        # Write to shared memory using KV-slot indices.
+        # Filter out -1 entries (padding / tokens without KV slots).
+        valid_mask = indices >= 0
+        valid_indices = indices[valid_mask]
         valid_data = data[valid_mask]
 
-        if len(valid_indices) == 0:
-            return
-
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(
-            "[routed_experts] save: tp_rank=%d num_tokens=%d valid=%d "
-            "host_indices[:3]=%s data_nonzero=%s",
-            self.tp_rank, num_tokens, len(valid_indices),
-            valid_indices[:3], (valid_data != 0).any(),
-        )
-
-        with _file_lock(self._lock_file):
-            self._host_buffer_view[valid_indices, :, :] = valid_data
+        if len(valid_indices) > 0:
+            with _file_lock(self._lock_file):
+                self._host_buffer_view[valid_indices, :, :] = valid_data
