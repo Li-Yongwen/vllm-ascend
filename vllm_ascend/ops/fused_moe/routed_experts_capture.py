@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from vllm.distributed.parallel_state import (
     get_dp_group,
@@ -64,11 +65,13 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         num_tokens = len(indices)
 
+        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
+
         import sys
         print(f"[SAVE-ENTRY] tp_rank={self.tp_rank} num_tokens={num_tokens} "
-              f"indices[:3]={indices[:3]}", file=sys.stderr, flush=True)
-
-        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
+              f"indices[:3]={indices[:3]} num_valid={np.sum(indices >= 0)} "
+              f"data[:2,0,:3]={data[:2, 0, :3]}",
+              file=sys.stderr, flush=True)
 
         host_indices = indices
 

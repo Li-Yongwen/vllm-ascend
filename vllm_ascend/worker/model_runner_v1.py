@@ -2819,33 +2819,29 @@ class NPUModelRunner(GPUModelRunner):
                     attn_compress_ratio = getattr(
                         self.kv_cache_config.kv_cache_groups[kv_cache_gid].kv_cache_spec,
                         'compress_ratio', 1)
-                    blk_table = self.input_batch.block_table[kv_cache_gid]
-                    block_size = blk_table.block_size
-                    # Compute cpu_slot_mapping for ALL tokens (not just
-                    # compressed ones).  Each token's KV slot is:
-                    #   block_number * (block_size * compress_ratio) + offset
-                    # where block_number comes from the block table and
-                    # offset = position % (block_size * compress_ratio).
-                    # This matches how the scheduler reads from shared memory.
-                    positions_np = getattr(self, '_prepare_positions_np', None)
-                    prepare_req_indices = getattr(self, '_prepare_req_indices', None)
-                    import sys
-                    print(f"[SLOT-DBG] positions_np={positions_np is not None} "
-                          f"prepare_req_indices={prepare_req_indices is not None} "
-                          f"compress_ratio={attn_compress_ratio} num_tokens={num_tokens}",
-                          file=sys.stderr, flush=True)
-                    if positions_np is not None and prepare_req_indices is not None:
-                        token_positions = positions_np[:num_tokens]
-                        logical_block_idx = token_positions // (block_size * attn_compress_ratio)
-                        max_blocks = blk_table.max_num_blocks_per_req
-                        blocks_per_phys = blk_table.blocks_per_phys_block
-                        block_table_np = blk_table.block_table.np
-                        block_table_indices = (prepare_req_indices * max_blocks * blocks_per_phys
-                                               + logical_block_idx)
-                        block_numbers = block_table_np.ravel()[block_table_indices]
-                        offsets = token_positions % (block_size * attn_compress_ratio)
-                        kv_slots = block_numbers * (block_size * attn_compress_ratio) + offsets
-                        self.cpu_slot_mapping = kv_slots
+                    if attn_compress_ratio > 1:
+                        # In compress mode, slot_mapping only covers the
+                        # compressed token positions.  We need a full slot
+                        # mapping for every token so that all tokens'
+                        # routed_experts can be saved to shared memory.
+                        blk_table = self.input_batch.block_table[kv_cache_gid]
+                        block_size = blk_table.block_size
+                        positions_np = getattr(self, '_prepare_positions_np', None)
+                        prepare_req_indices = getattr(self, '_prepare_req_indices', None)
+                        if positions_np is not None and prepare_req_indices is not None:
+                            token_positions = positions_np[:num_tokens]
+                            logical_block_idx = token_positions // (block_size * attn_compress_ratio)
+                            max_blocks = blk_table.max_num_blocks_per_req
+                            blocks_per_phys = blk_table.blocks_per_phys_block
+                            block_table_np = blk_table.block_table.np
+                            block_table_indices = (prepare_req_indices * max_blocks * blocks_per_phys
+                                                   + logical_block_idx)
+                            block_numbers = block_table_np.ravel()[block_table_indices]
+                            offsets = token_positions % (block_size * attn_compress_ratio)
+                            kv_slots = block_numbers * (block_size * attn_compress_ratio) + offsets
+                            self.cpu_slot_mapping = kv_slots
+                        else:
+                            self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
                     else:
                         self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
