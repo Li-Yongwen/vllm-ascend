@@ -18,8 +18,8 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     In the Ascend EP implementation, gating runs *before* EP dispatch,
     so every TP(EP) rank sees the full set of tokens and produces its
     own topk_ids.  Only TP0 writes the data to shared memory using
-    KV-slot-based indexing.  The scheduler reads using the same
-    KV-slot calculation.
+    KV-slot-based indexing.  The scheduler reads the slot_mapping from
+    shared memory (written by the worker) to locate each token's data.
     """
 
     def __init__(self) -> None:
@@ -49,12 +49,15 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         self,
         indices,  # np.ndarray
         token_positions=None,  # np.ndarray | None -- ignored
+        num_reqs=0,  # number of requests in this step
+        token_counts_per_req=None,  # np.ndarray | None -- token count per request
     ) -> None:
         """Save captured experts from device buffer to shared memory.
 
         Only TP0 performs the write.  Data is written using the KV-slot
-        indices passed in ``indices``.  The scheduler reads using the
-        same KV-slot calculation.
+        indices passed in ``indices``.  The slot_mapping and token counts
+        are also written to shared memory so the scheduler can locate
+        each token's data without computing slot indices itself.
         """
         if self._lock_file is None:
             return
@@ -70,12 +73,23 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
-        # Write to shared memory using KV-slot indices.
-        # Filter out -1 entries (padding / tokens without KV slots).
-        valid_mask = indices >= 0
-        valid_indices = indices[valid_mask]
-        valid_data = data[valid_mask]
+        with _file_lock(self._lock_file):
+            # Write routed_experts data using KV-slot indices.
+            # Filter out -1 entries (padding / tokens without KV slots).
+            valid_mask = indices >= 0
+            valid_indices = indices[valid_mask]
+            valid_data = data[valid_mask]
 
-        if len(valid_indices) > 0:
-            with _file_lock(self._lock_file):
+            if len(valid_indices) > 0:
                 self._host_buffer_view[valid_indices, :, :] = valid_data
+
+            # Write slot_mapping to shared memory for scheduler to read.
+            if hasattr(self, '_slot_mapping_view') and self._slot_mapping_view is not None:
+                self._slot_mapping_view[:num_tokens] = indices
+
+            # Write token counts per request for scheduler to locate tokens.
+            if (hasattr(self, '_token_counts_view')
+                    and self._token_counts_view is not None
+                    and token_counts_per_req is not None
+                    and num_reqs > 0):
+                self._token_counts_view[:num_reqs] = token_counts_per_req[:num_reqs]

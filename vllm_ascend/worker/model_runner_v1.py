@@ -717,6 +717,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts and vllm_version_is("0.20.2"):
             self._prepare_positions_np = positions_np
             self._prepare_req_indices = req_indices
+            self._token_counts_per_req = num_scheduled_tokens_np[:num_reqs].copy()
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP
@@ -2247,7 +2248,21 @@ class NPUModelRunner(GPUModelRunner):
                 capturer = AscendRoutedExpertsCapturer.get_instance()
                 if capturer is not None:
                     token_positions = getattr(self, 'cpu_positions', None)
-                    capturer.save_captured_experts(indices=self.cpu_slot_mapping, token_positions=token_positions)
+                    num_reqs = self.input_batch.num_reqs
+                    # token count per request for the current step
+                    token_counts = getattr(self, '_token_counts_per_req', None)
+                    # Write metadata: block_table.block_size and physical_block_size
+                    # so the scheduler can compute the correct KV slot indices.
+                    if hasattr(capturer, '_metadata_view') and capturer._metadata_view is not None:
+                        blk_table = self.input_batch.block_table[0]
+                        capturer._metadata_view[0] = blk_table.block_size
+                        capturer._metadata_view[1] = blk_table.physical_block_size
+                    capturer.save_captured_experts(
+                        indices=self.cpu_slot_mapping,
+                        token_positions=token_positions,
+                        num_reqs=num_reqs,
+                        token_counts_per_req=token_counts,
+                    )
             elif self.routed_experts_initialized:
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
@@ -2835,11 +2850,6 @@ class NPUModelRunner(GPUModelRunner):
                         invalid_mask = slot_mapping_cpu < 0
                         self.cpu_slot_mapping = slot_mapping_cpu.copy()
                         self.cpu_slot_mapping[invalid_mask] = computed_slots[invalid_mask]
-                        import sys
-                        print(f"[SLOT-MERGE] num_invalid={invalid_mask.sum()} "
-                              f"computed_slots_invalid[:3]={computed_slots[invalid_mask][:3]} "
-                              f"slot_mapping_valid[:3]={slot_mapping_cpu[~invalid_mask][:3]}",
-                              file=sys.stderr, flush=True)
                     else:
                         self.cpu_slot_mapping = slot_mapping_cpu
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
@@ -3544,6 +3554,7 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_kv_tokens=self.max_num_kv_tokens,
                 vllm_config=self.vllm_config,
                 compress_ratio=attn_compress_ratio,
+                max_num_reqs=self.scheduler_config.max_num_seqs,
             )
             self.routed_experts_initialized = True
         else:
