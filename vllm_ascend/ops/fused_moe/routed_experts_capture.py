@@ -43,15 +43,42 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
             raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
 
         ctx = get_forward_context()
+        n = topk_ids.shape[0]
+
         if ctx.dp_metadata is None:  # single dp
-            start_loc = 0
-            end_loc = topk_ids.shape[0]
-            token_num_per_dp = topk_ids.shape[0]
+            if self.tp_size > 1:
+                # EP without DP: each TP rank sees only its own tokens.
+                # all_gather to reconstruct the full token set so that
+                # TP0 can save all tokens' routing data.
+                token_num_per_tp = math.ceil(n / self.tp_size) * self.tp_size // self.tp_size
+                # Pad to equal-size chunks for all_gather.
+                chunk_size = math.ceil(n / self.tp_size)
+                pad_size = chunk_size - n
+                if pad_size > 0:
+                    topk_ids = torch.nn.functional.pad(
+                        topk_ids, (0, 0, 0, pad_size))
+                full_topk_ids = tensor_model_parallel_all_gather(
+                    topk_ids, dim=0)
+                total = self.tp_size * chunk_size
+                # The gathered size may have padding; trim to actual total.
+                # Each TP rank sent `n` real tokens (potentially different
+                # counts per rank).  Since we padded equally, the gathered
+                # tensor has tp_size * chunk_size rows, but only
+                # sum(num_tokens_per_rank) are real.  We don't know per-rank
+                # counts here, so keep chunk_size * tp_size and let save
+                # filter via slot_mapping (padded slots have index -1).
+                token_num_per_dp = total
+                start_loc = 0
+                end_loc = total
+                topk_ids = full_topk_ids
+            else:
+                start_loc = 0
+                end_loc = n
+                token_num_per_dp = n
         else:  # multi dp
             num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
             token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
             total = int(num_tokens_dp.sum().item())
-            n = topk_ids.shape[0]
 
             if n == total:
                 cumsum = torch.cumsum(num_tokens_dp, dim=0)
