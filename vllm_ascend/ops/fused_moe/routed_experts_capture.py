@@ -1,13 +1,9 @@
-import math
-
 import torch
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     _file_lock,
@@ -18,10 +14,10 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     """
     Capturer for routed experts with device and optional shared memory buffer.
 
-    In EP setups all TP(EP) ranks see the same global topk_ids after
-    all_gather.  Only TP0 performs the actual save to shared memory
-    (the others share the same dp_rank == 0 buffer but skip the write
-    to avoid redundant work).
+    In EP setups each TP(EP) rank has a *different* slot_mapping where only
+    its own tokens have valid (non-negative) slots.  Every rank saves its
+    own valid-slot data to the same shared memory so that all slots are
+    eventually covered.
     """
 
     def __init__(self) -> None:
@@ -34,78 +30,18 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         """
         Capture expert routing decisions for a specific layer.
 
-        When EP is active, we all_gather the topk_ids so that every
-        rank's device_buffer contains the full set of routing decisions.
-        This allows save_captured_experts to correctly pair data with
-        the global slot_mapping.
+        In the Ascend EP implementation, gating runs *before* EP dispatch,
+        so ``topk_ids`` contains all tokens in the batch regardless of which
+        EP rank we are on.  We simply store it into ``device_buffer``.
         """
         if self._device_buffer is None:
             raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
 
-        ctx = get_forward_context()
         n = topk_ids.shape[0]
-
-        if ctx.dp_metadata is None:  # single dp
-            if self.tp_size > 1:
-                # EP without DP: each TP rank sees only its own tokens.
-                # all_gather to reconstruct the full token set so that
-                # TP0 can save all tokens' routing data.
-                token_num_per_tp = math.ceil(n / self.tp_size) * self.tp_size // self.tp_size
-                # Pad to equal-size chunks for all_gather.
-                chunk_size = math.ceil(n / self.tp_size)
-                pad_size = chunk_size - n
-                if pad_size > 0:
-                    topk_ids = torch.nn.functional.pad(
-                        topk_ids, (0, 0, 0, pad_size))
-                full_topk_ids = tensor_model_parallel_all_gather(
-                    topk_ids, dim=0)
-                total = self.tp_size * chunk_size
-                # The gathered size may have padding; trim to actual total.
-                # Each TP rank sent `n` real tokens (potentially different
-                # counts per rank).  Since we padded equally, the gathered
-                # tensor has tp_size * chunk_size rows, but only
-                # sum(num_tokens_per_rank) are real.  We don't know per-rank
-                # counts here, so keep chunk_size * tp_size and let save
-                # filter via slot_mapping (padded slots have index -1).
-                token_num_per_dp = total
-                start_loc = 0
-                end_loc = total
-                topk_ids = full_topk_ids
-            else:
-                start_loc = 0
-                end_loc = n
-                token_num_per_dp = n
-        else:  # multi dp
-            num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
-            token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
-            total = int(num_tokens_dp.sum().item())
-
-            if n == total:
-                cumsum = torch.cumsum(num_tokens_dp, dim=0)
-                end_loc = int(cumsum[self.dp_rank].item())
-                start_loc = end_loc - token_num_per_dp
-            elif self.tp_size > 1 or self.dp_size > 1:
-                token_num_per_tp = math.ceil(token_num_per_dp / self.tp_size)
-                pad_size = token_num_per_tp - topk_ids.shape[0]
-                if pad_size > 0:
-                    topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad_size))
-                full_topk_ids = tensor_model_parallel_all_gather(topk_ids, dim=0)
-                topk_ids = full_topk_ids[:token_num_per_dp]
-                start_loc = 0
-                end_loc = token_num_per_dp
-            else:
-                raise AssertionError(
-                    "AscendRoutedExpertsCapturer: unexpected topk_ids batch dim "
-                    f"{n} (expected {total} or {token_num_per_dp} "
-                    f"for dp_rank={self.dp_rank})"
-                )
-
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
-            start_loc:end_loc, :
-        ]
+        self._device_buffer[:n, layer_id, :] = topk_ids
 
     def save_captured_experts(
         self,
@@ -114,22 +50,16 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     ) -> None:
         """Save captured experts from device buffer to shared memory.
 
-        After all_gather in capture(), device_buffer contains the full
-        DP-rank view.  We use the global slot_mapping (indices) to write
-        the data.  Only TP0 performs the actual write; other TP ranks
-        have the same data but skip to avoid redundant I/O.
+        Each TP(EP) rank writes only the slots whose index is >= 0 in its
+        ``cpu_slot_mapping``.  Because different EP ranks have different
+        valid slots, every slot is written by exactly one rank, and the
+        shared memory ends up with complete data.
         """
         if self._lock_file is None:
             return
         if self._host_buffer_view is None:
             return
         if self._device_buffer is None:
-            return
-
-        # In EP setups all ranks have identical device_buffer content
-        # (thanks to all_gather) and identical slot_mapping.  Let only
-        # TP0 do the write to shared memory to avoid redundant work.
-        if self.tp_rank != 0:
             return
 
         num_tokens = len(indices)
@@ -142,7 +72,7 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         host_indices = indices
 
-        # Skip slots with -1 (padding tokens that have no KV cache slot).
+        # Skip slots with -1 (tokens that belong to other EP ranks).
         valid_mask = host_indices >= 0
         valid_indices = host_indices[valid_mask]
         valid_data = data[valid_mask]
@@ -152,11 +82,11 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(
+        logger.debug(
             "[routed_experts] save: tp_rank=%d num_tokens=%d valid=%d "
-            "indices[:3]=%s host_indices[:3]=%s data_nonzero=%s",
+            "host_indices[:3]=%s data_nonzero=%s",
             self.tp_rank, num_tokens, len(valid_indices),
-            indices[:3], valid_indices[:3], (valid_data != 0).any(),
+            valid_indices[:3], (valid_data != 0).any(),
         )
 
         with _file_lock(self._lock_file):

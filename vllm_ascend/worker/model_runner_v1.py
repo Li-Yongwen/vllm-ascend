@@ -2815,11 +2815,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
-                import sys
-                print(f"[RoutedExperts] kv_cache_gid={kv_cache_gid} "
-                      f"enable={self.model_config.enable_return_routed_experts} "
-                      f"version_0202={vllm_version_is('0.20.2')}",
-                      file=sys.stderr, flush=True)
                 if vllm_version_is("0.20.2"):
                     attn_compress_ratio = getattr(
                         self.kv_cache_config.kv_cache_groups[kv_cache_gid].kv_cache_spec,
@@ -2829,12 +2824,6 @@ class NPUModelRunner(GPUModelRunner):
                         block_size = blk_table.block_size
                         positions_np = getattr(self, '_prepare_positions_np', None)
                         prepare_req_indices = getattr(self, '_prepare_req_indices', None)
-                        import sys
-                        print(f"[SLOT-MAP] compress_ratio={attn_compress_ratio} "
-                              f"positions_np={positions_np is not None} "
-                              f"prepare_req_indices={prepare_req_indices is not None} "
-                              f"num_tokens={num_tokens} slot_mapping[:3]={slot_mapping[:3].cpu().numpy()}",
-                              file=sys.stderr, flush=True)
                         if positions_np is not None and prepare_req_indices is not None:
                             token_positions = positions_np[:num_tokens]
                             logical_block_idx = token_positions // (block_size * 4)
@@ -2849,10 +2838,6 @@ class NPUModelRunner(GPUModelRunner):
                             self.cpu_slot_mapping = kv_slots
                         else:
                             self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
-                        import sys
-                        print(f"[SLOT-MAP-RESULT] cpu_slot_mapping[:5]={self.cpu_slot_mapping[:5]} "
-                              f"num_valid={np.sum(self.cpu_slot_mapping >= 0)}",
-                              file=sys.stderr, flush=True)
                     else:
                         self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
