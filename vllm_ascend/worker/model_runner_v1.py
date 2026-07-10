@@ -2832,28 +2832,25 @@ class NPUModelRunner(GPUModelRunner):
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                 if vllm_version_is("0.20.2"):
                     slot_mapping_cpu = slot_mapping[:num_tokens].cpu().numpy()
-                    # slot_mapping may contain -1 for tokens that are not in
-                    # the compressed KV cache.  Use the block_table's own
-                    # CPU slot-mapping method to compute slots for those tokens.
                     positions_np = getattr(self, '_prepare_positions_np', None)
-                    prepare_req_indices = getattr(self, '_prepare_req_indices', None)
-                    if positions_np is not None and prepare_req_indices is not None:
+                    # Compute a full slot mapping for every token using
+                    # positions and block_table, so that tokens with -1 in
+                    # slot_mapping (compressed / padded) also get valid slots.
+                    if positions_np is not None:
                         blk_table = self.input_batch.block_table[kv_cache_gid]
+                        block_size = blk_table.block_size
                         token_positions = positions_np[:num_tokens]
-                        req_indices = prepare_req_indices[:num_tokens]
-                        # Debug: print block_table values for first request
-                        import sys
-                        bt = blk_table.block_table.np
-                        num_reqs_now = self.input_batch.num_reqs
-                        for ri in range(min(num_reqs_now, 3)):
-                            req_id = self.input_batch.req_ids[ri]
-                            nb = blk_table.num_blocks_per_row[ri]
-                            print(f"[BT] req_id={req_id} local_blocks={bt[ri,:nb]}", file=sys.stderr, flush=True)
-                        # Use the block_table's CPU slot mapping computation,
-                        # which handles hybrid blocks, CP, compress, etc.
-                        blk_table.compute_slot_mapping_draft(
-                            req_indices, token_positions)
-                        computed_slots = blk_table.slot_mapping.np[:num_tokens]
+                        # slot = block_id[position // block_size] * block_size + position % block_size
+                        logical_block_idx = token_positions // block_size
+                        # block_table.np[req_row, logical_col] = physical_block_id
+                        # In hybrid mode the logical table is expanded.
+                        max_logical_blocks = blk_table.max_num_blocks_per_req * blk_table.blocks_per_phys_block
+                        req_row = self.input_batch.req_indices[:num_tokens]  # type: ignore
+                        block_table_col = np.clip(logical_block_idx, 0, max_logical_blocks - 1)
+                        block_table_indices = req_row * max_logical_blocks + block_table_col
+                        block_numbers = blk_table.block_table.np.ravel()[block_table_indices]
+                        offsets = token_positions % block_size
+                        computed_slots = block_numbers * block_size + offsets
                         # Merge: use slot_mapping where valid, computed_slots where -1
                         invalid_mask = slot_mapping_cpu < 0
                         self.cpu_slot_mapping = slot_mapping_cpu.copy()
