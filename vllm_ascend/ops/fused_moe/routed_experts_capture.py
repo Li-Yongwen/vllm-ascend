@@ -76,7 +76,7 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         import logging
         logger = logging.getLogger(__name__)
-        logger.debug(
+        logger.info(
             "[routed_experts] save: tp_rank=%d num_tokens=%d valid=%d "
             "indices[:3]=%s host_indices[:3]=%s data_nonzero=%s",
             self.tp_rank, num_tokens, len(valid_indices),
