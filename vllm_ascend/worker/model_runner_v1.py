@@ -2837,24 +2837,26 @@ class NPUModelRunner(GPUModelRunner):
                     # positions and block_table, so that tokens with -1 in
                     # slot_mapping (compressed / padded) also get valid slots.
                     if positions_np is not None:
-                        blk_table = self.input_batch.block_table[kv_cache_gid]
-                        block_size = blk_table.block_size
-                        token_positions = positions_np[:num_tokens]
-                        # slot = block_id[position // block_size] * block_size + position % block_size
-                        logical_block_idx = token_positions // block_size
-                        # block_table.np[req_row, logical_col] = physical_block_id
-                        # In hybrid mode the logical table is expanded.
-                        max_logical_blocks = blk_table.max_num_blocks_per_req * blk_table.blocks_per_phys_block
-                        req_row = self.input_batch.req_indices[:num_tokens]  # type: ignore
-                        block_table_col = np.clip(logical_block_idx, 0, max_logical_blocks - 1)
-                        block_table_indices = req_row * max_logical_blocks + block_table_col
-                        block_numbers = blk_table.block_table.np.ravel()[block_table_indices]
-                        offsets = token_positions % block_size
-                        computed_slots = block_numbers * block_size + offsets
-                        # Merge: use slot_mapping where valid, computed_slots where -1
-                        invalid_mask = slot_mapping_cpu < 0
-                        self.cpu_slot_mapping = slot_mapping_cpu.copy()
-                        self.cpu_slot_mapping[invalid_mask] = computed_slots[invalid_mask]
+                        prepare_req_indices = getattr(self, '_prepare_req_indices', None)
+                        if prepare_req_indices is not None:
+                            blk_table = self.input_batch.block_table[kv_cache_gid]
+                            block_size = blk_table.block_size
+                            token_positions = positions_np[:num_tokens]
+                            # slot = block_id[position // block_size] * block_size + position % block_size
+                            logical_block_idx = token_positions // block_size
+                            max_logical_blocks = blk_table.max_num_blocks_per_req * blk_table.blocks_per_phys_block
+                            req_row = prepare_req_indices[:num_tokens]
+                            block_table_col = np.clip(logical_block_idx, 0, max_logical_blocks - 1)
+                            block_table_indices = req_row * max_logical_blocks + block_table_col
+                            block_numbers = blk_table.block_table.np.ravel()[block_table_indices]
+                            offsets = token_positions % block_size
+                            computed_slots = block_numbers * block_size + offsets
+                            # Merge: use slot_mapping where valid, computed_slots where -1
+                            invalid_mask = slot_mapping_cpu < 0
+                            self.cpu_slot_mapping = slot_mapping_cpu.copy()
+                            self.cpu_slot_mapping[invalid_mask] = computed_slots[invalid_mask]
+                        else:
+                            self.cpu_slot_mapping = slot_mapping_cpu
                     else:
                         self.cpu_slot_mapping = slot_mapping_cpu
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
