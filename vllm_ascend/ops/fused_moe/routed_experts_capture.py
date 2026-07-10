@@ -102,10 +102,15 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         # In EP setups all ranks have identical device_buffer content
         # (thanks to all_gather) and identical slot_mapping.  Let only
         # TP0 do the write to shared memory to avoid redundant work.
-        if get_tensor_model_parallel_rank() != 0:
+        if self.tp_rank != 0:
             return
 
         num_tokens = len(indices)
+
+        import sys
+        print(f"[SAVE-ENTRY] tp_rank={self.tp_rank} num_tokens={num_tokens} "
+              f"indices[:3]={indices[:3]}", file=sys.stderr, flush=True)
+
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
         host_indices = indices
