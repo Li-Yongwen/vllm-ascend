@@ -1,7 +1,4 @@
-import math
-
 import torch
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_tensor_model_parallel_rank,
@@ -10,6 +7,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    _file_lock,
 )
 
 
@@ -17,8 +15,10 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     """
     Capturer for routed experts with device and optional shared memory buffer.
 
-    This class captures expert routing decisions during model forward passes
-    and optionally stores them in shared memory for cross-process access.
+    In EP setups each TP(EP) rank stores only the tokens it is responsible
+    for into ``device_buffer`` and saves them to the same shared memory
+    (dp_rank == 0).  The scheduler-side ``RoutedExpertsReader`` reads from
+    that single shared memory which is populated by all TP ranks.
     """
 
     def __init__(self) -> None:
@@ -31,52 +31,57 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         """
         Capture expert routing decisions for a specific layer.
 
-        Args:
-            layer_id: The layer index.
-            topk_ids: Tensor of shape (batch_size, num_routed_experts).
+        Only the tokens visible to the current TP rank are stored.
+        No all_gather is performed — each rank independently saves its
+        own slice, and the shared memory is populated by all ranks.
         """
-
         if self._device_buffer is None:
             raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
 
-        ctx = get_forward_context()
-        if ctx.dp_metadata is None:  # single dp
-            start_loc = 0
-            end_loc = topk_ids.shape[0]
-            token_num_per_dp = topk_ids.shape[0]
-        else:  # multi dp
-            num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
-            token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
-            total = int(num_tokens_dp.sum().item())
-            n = topk_ids.shape[0]
-
-            if n == total:
-                # Naive dispatch: all DP ranks' tokens concatenated before routing.
-                cumsum = torch.cumsum(num_tokens_dp, dim=0)
-                end_loc = int(cumsum[self.dp_rank].item())
-                start_loc = end_loc - token_num_per_dp
-            elif self.tp_size > 1 or self.dp_size > 1:
-                # multi dp & tp
-                # when use multi tp, token_per_dp will be padded,
-                # we should to unpad it
-                token_num_per_tp = math.ceil(token_num_per_dp / self.tp_size)
-                pad_size = token_num_per_tp - topk_ids.shape[0]
-                if pad_size > 0:
-                    # when use mc2, pad_size <= 0
-                    # when use alltoall, tail tp rank's pad_size >= 0
-                    topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad_size))
-                full_topk_ids = tensor_model_parallel_all_gather(topk_ids, dim=0)
-                topk_ids = full_topk_ids[:token_num_per_dp]
-                start_loc = 0
-                end_loc = token_num_per_dp
-            else:
-                raise AssertionError(
-                    "AscendRoutedExpertsCapturer: unexpected topk_ids batch dim "
-                    f"{n} (expected {total} or {token_num_per_dp} "
-                    f"for dp_rank={self.dp_rank})"
-                )
-
+        n = topk_ids.shape[0]
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[start_loc:end_loc, :]
+        self._device_buffer[:n, layer_id, :] = topk_ids
+
+    def save_captured_experts(
+        self,
+        indices,  # np.ndarray
+        token_positions=None,  # np.ndarray | None
+    ) -> None:
+        """Save captured experts from device buffer to shared memory.
+
+        In EP setups all TP(EP) ranks write to the same shared memory
+        (dp_rank == 0).  Each rank saves only the tokens it captured.
+        """
+        if self._lock_file is None:
+            return
+        if self._host_buffer_view is None:
+            return
+        if self._device_buffer is None:
+            return
+
+        num_tokens = len(indices)
+        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
+
+        host_indices = indices
+
+        # Skip slots with -1 (padding tokens that have no KV cache slot).
+        valid_mask = host_indices >= 0
+        valid_indices = host_indices[valid_mask]
+        valid_data = data[valid_mask]
+
+        if len(valid_indices) == 0:
+            return
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            "[routed_experts] save: tp_rank=%d num_tokens=%d valid=%d "
+            "indices[:3]=%s host_indices[:3]=%s data_nonzero=%s",
+            self.tp_rank, num_tokens, len(valid_indices),
+            indices[:3], valid_indices[:3], (valid_data != 0).any(),
+        )
+
+        with _file_lock(self._lock_file):
+            self._host_buffer_view[valid_indices, :, :] = valid_data
