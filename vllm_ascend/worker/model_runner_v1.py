@@ -2816,16 +2816,16 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                 if vllm_version_is("0.20.2"):
-                    attn_compress_ratio = getattr(
-                        self.kv_cache_config.kv_cache_groups[kv_cache_gid].kv_cache_spec,
-                        'compress_ratio', 1)
-                    blk_table = self.input_batch.block_table[kv_cache_gid]
-                    block_size = blk_table.block_size
+                    slot_mapping_cpu = slot_mapping[:num_tokens].cpu().numpy()
+                    # slot_mapping may contain -1 for tokens that are not in
+                    # the compressed KV cache.  Use positions + block_table to
+                    # compute a full slot mapping, then merge: keep slot_mapping
+                    # where valid, use computed slots where slot_mapping == -1.
                     positions_np = getattr(self, '_prepare_positions_np', None)
                     prepare_req_indices = getattr(self, '_prepare_req_indices', None)
-                    # Always compute a full slot mapping from positions/block_table
-                    # because slot_mapping may only contain compressed tokens with -1 padding.
                     if positions_np is not None and prepare_req_indices is not None:
+                        blk_table = self.input_batch.block_table[kv_cache_gid]
+                        block_size = blk_table.block_size
                         token_positions = positions_np[:num_tokens]
                         logical_block_idx = token_positions // block_size
                         max_blocks = blk_table.max_num_blocks_per_req
@@ -2835,17 +2835,13 @@ class NPUModelRunner(GPUModelRunner):
                                                + logical_block_idx)
                         block_numbers = block_table_np.ravel()[block_table_indices]
                         offsets = token_positions % block_size
-                        self.cpu_slot_mapping = block_numbers * block_size + offsets
-                        # Debug: compare with slot_mapping
-                        import sys
-                        slot_mapping_cpu = slot_mapping[:num_tokens].cpu().numpy()
-                        print(f"[SLOT-CMP] compress_ratio={attn_compress_ratio} "
-                              f"kv_slots[:5]={self.cpu_slot_mapping[:5]} "
-                              f"slot_mapping[:5]={slot_mapping_cpu[:5]} "
-                              f"match={np.array_equal(self.cpu_slot_mapping, slot_mapping_cpu)}",
-                              file=sys.stderr, flush=True)
+                        computed_slots = block_numbers * block_size + offsets
+                        # Merge: use slot_mapping where valid, computed_slots where -1
+                        invalid_mask = slot_mapping_cpu < 0
+                        self.cpu_slot_mapping = slot_mapping_cpu.copy()
+                        self.cpu_slot_mapping[invalid_mask] = computed_slots[invalid_mask]
                     else:
-                        self.cpu_slot_mapping = slot_mapping[:num_tokens].cpu().numpy()
+                        self.cpu_slot_mapping = slot_mapping_cpu
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
                 elif self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device

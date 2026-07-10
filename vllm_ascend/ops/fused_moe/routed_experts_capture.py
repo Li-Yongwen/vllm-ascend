@@ -70,11 +70,6 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
-        import sys
-        print(f"[SAVE] num_tokens={num_tokens} num_valid={np.sum(indices >= 0)} "
-              f"indices[:5]={indices[:5]} data[:2,0,:3]={data[:2, 0, :3]}",
-              file=sys.stderr, flush=True)
-
         # Write to shared memory using KV-slot indices.
         # Filter out -1 entries (padding / tokens without KV slots).
         valid_mask = indices >= 0
