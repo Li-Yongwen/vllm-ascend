@@ -2851,17 +2851,9 @@ class NPUModelRunner(GPUModelRunner):
                             block_numbers = blk_table.block_table.np.ravel()[block_table_indices]
                             offsets = token_positions % block_size
                             computed_slots = block_numbers * block_size + offsets
-                            # Merge: use slot_mapping where valid, computed_slots where -1
-                            invalid_mask = slot_mapping_cpu < 0
-                            # Debug
-                            import sys
-                            num_invalid = int(invalid_mask.sum())
-                            if num_invalid > 0:
-                                print(f"[SLOT-MERGE] num_invalid={num_invalid} "
-                                      f"computed[:5]={computed_slots[invalid_mask][:5]}",
-                                      file=sys.stderr, flush=True)
-                            self.cpu_slot_mapping = slot_mapping_cpu.copy()
-                            self.cpu_slot_mapping[invalid_mask] = computed_slots[invalid_mask]
+                            # Use computed_slots for ALL tokens so that
+                            # scheduler reads from the same slot indices.
+                            self.cpu_slot_mapping = computed_slots.copy()
                         else:
                             self.cpu_slot_mapping = slot_mapping_cpu
                     else:
