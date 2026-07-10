@@ -2841,6 +2841,14 @@ class NPUModelRunner(GPUModelRunner):
                         blk_table = self.input_batch.block_table[kv_cache_gid]
                         token_positions = positions_np[:num_tokens]
                         req_indices = prepare_req_indices[:num_tokens]
+                        # Debug: print block_table values for first request
+                        import sys
+                        bt = blk_table.block_table.np
+                        num_reqs_now = self.input_batch.num_reqs
+                        for ri in range(min(num_reqs_now, 3)):
+                            req_id = self.input_batch.req_ids[ri]
+                            nb = blk_table.num_blocks_per_row[ri]
+                            print(f"[BT] req_id={req_id} local_blocks={bt[ri,:nb]}", file=sys.stderr, flush=True)
                         # Use the block_table's CPU slot mapping computation,
                         # which handles hybrid blocks, CP, compress, etc.
                         blk_table.compute_slot_mapping_draft(
