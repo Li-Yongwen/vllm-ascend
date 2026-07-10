@@ -2815,6 +2815,11 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+                import sys
+                print(f"[RoutedExperts] kv_cache_gid={kv_cache_gid} "
+                      f"enable={self.model_config.enable_return_routed_experts} "
+                      f"version_0202={vllm_version_is('0.20.2')}",
+                      file=sys.stderr, flush=True)
                 if vllm_version_is("0.20.2"):
                     attn_compress_ratio = getattr(
                         self.kv_cache_config.kv_cache_groups[kv_cache_gid].kv_cache_spec,
