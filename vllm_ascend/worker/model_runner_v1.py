@@ -2835,6 +2835,11 @@ class NPUModelRunner(GPUModelRunner):
                         invalid_mask = slot_mapping_cpu < 0
                         self.cpu_slot_mapping = slot_mapping_cpu.copy()
                         self.cpu_slot_mapping[invalid_mask] = computed_slots[invalid_mask]
+                        import sys
+                        print(f"[SLOT-MERGE] num_invalid={invalid_mask.sum()} "
+                              f"computed_slots_invalid[:3]={computed_slots[invalid_mask][:3]} "
+                              f"slot_mapping_valid[:3]={slot_mapping_cpu[~invalid_mask][:3]}",
+                              file=sys.stderr, flush=True)
                     else:
                         self.cpu_slot_mapping = slot_mapping_cpu
                     self.cpu_positions = getattr(self, '_prepare_positions_np', np.zeros(1))[:num_tokens].copy()
