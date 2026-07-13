@@ -38,7 +38,7 @@ from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_f
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group, get_tensor_model_parallel_rank
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -2783,7 +2783,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int, total_num_scheduled_tokens_compressed_list: list[int]):
-            if kv_cache_gid == 0 and self.tp_rank == 0:
+            if kv_cache_gid == 0 and get_tensor_model_parallel_rank() == 0:
                 import sys
                 print(f"[BTSM-ENTRY] kv_cache_gid={kv_cache_gid} num_tokens={num_tokens} num_reqs={num_reqs}",
                       file=sys.stderr, flush=True)
@@ -2842,7 +2842,7 @@ class NPUModelRunner(GPUModelRunner):
                     # slot_mapping (compressed / padded) also get valid slots.
                     if positions_np is not None:
                         prepare_req_indices = getattr(self, '_prepare_req_indices', None)
-                        if self.tp_rank == 0:
+                        if get_tensor_model_parallel_rank() == 0:
                             import sys as _sys
                             print(f"[SLOT-PATH] positions_ok=True req_indices_ok={prepare_req_indices is not None} "
                                   f"num_tokens={num_tokens}", file=_sys.stderr, flush=True)
@@ -2862,7 +2862,7 @@ class NPUModelRunner(GPUModelRunner):
                             # Use computed_slots for ALL tokens so that
                             # scheduler reads from the same slot indices.
                             self.cpu_slot_mapping = computed_slots.copy()
-                            if self.tp_rank == 0:
+                            if get_tensor_model_parallel_rank() == 0:
                                 import sys as _sys2
                                 req_ids = self.input_batch.req_ids
                                 print(f"[W-SLOT] req_ids={req_ids[:10]}", file=_sys2.stderr, flush=True)
