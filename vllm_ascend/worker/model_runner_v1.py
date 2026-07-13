@@ -2783,9 +2783,10 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int, total_num_scheduled_tokens_compressed_list: list[int]):
-            import sys
-            print(f"[BTSM-ENTRY] kv_cache_gid={kv_cache_gid} num_tokens={num_tokens} num_reqs={num_reqs}",
-                  file=sys.stderr, flush=True)
+            if kv_cache_gid == 0 and self.tp_rank == 0:
+                import sys
+                print(f"[BTSM-ENTRY] kv_cache_gid={kv_cache_gid} num_tokens={num_tokens} num_reqs={num_reqs}",
+                      file=sys.stderr, flush=True)
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if self.pcp_size > 1:
@@ -2841,9 +2842,10 @@ class NPUModelRunner(GPUModelRunner):
                     # slot_mapping (compressed / padded) also get valid slots.
                     if positions_np is not None:
                         prepare_req_indices = getattr(self, '_prepare_req_indices', None)
-                        import sys
-                        print(f"[SLOT-PATH] positions_ok=True req_indices_ok={prepare_req_indices is not None} "
-                              f"num_tokens={num_tokens}", file=sys.stderr, flush=True)
+                        if self.tp_rank == 0:
+                            import sys as _sys
+                            print(f"[SLOT-PATH] positions_ok=True req_indices_ok={prepare_req_indices is not None} "
+                                  f"num_tokens={num_tokens}", file=_sys.stderr, flush=True)
                         if prepare_req_indices is not None:
                             blk_table = self.input_batch.block_table[kv_cache_gid]
                             block_size = blk_table.block_size
@@ -2860,20 +2862,21 @@ class NPUModelRunner(GPUModelRunner):
                             # Use computed_slots for ALL tokens so that
                             # scheduler reads from the same slot indices.
                             self.cpu_slot_mapping = computed_slots.copy()
-                            import sys
-                            req_ids = self.input_batch.req_ids
-                            print(f"[W-SLOT] req_ids={req_ids[:10]}", file=sys.stderr, flush=True)
-                            for ri in range(min(self.input_batch.num_reqs, 10)):
-                                mask = (req_row == ri)
-                                if mask.any():
-                                    pos = token_positions[mask]
-                                    bn = block_numbers[mask]
-                                    cs = computed_slots[mask]
-                                    print(f"[W-SLOT] req_idx={ri} block_size={block_size} "
-                                          f"pos[:3]={pos[:3].tolist()} "
-                                          f"block_num[:3]={bn[:3].tolist()} "
-                                          f"slots[:3]={cs[:3].tolist()}",
-                                          file=sys.stderr, flush=True)
+                            if self.tp_rank == 0:
+                                import sys as _sys2
+                                req_ids = self.input_batch.req_ids
+                                print(f"[W-SLOT] req_ids={req_ids[:10]}", file=_sys2.stderr, flush=True)
+                                for ri in range(min(self.input_batch.num_reqs, 10)):
+                                    mask = (req_row == ri)
+                                    if mask.any():
+                                        pos = token_positions[mask]
+                                        bn = block_numbers[mask]
+                                        cs = computed_slots[mask]
+                                        print(f"[W-SLOT] req_idx={ri} block_size={block_size} "
+                                              f"pos[:3]={pos[:3].tolist()} "
+                                              f"block_num[:3]={bn[:3].tolist()} "
+                                              f"slots[:3]={cs[:3].tolist()}",
+                                              file=_sys2.stderr, flush=True)
                         else:
                             self.cpu_slot_mapping = slot_mapping_cpu
                     else:
