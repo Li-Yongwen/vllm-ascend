@@ -73,18 +73,14 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
-        # In EP mode, only write tokens that have non-zero data on this rank.
-        non_zero_mask = np.any(data != 0, axis=(1, 2))
-        print(f"[SAVE2] tp_rank={self.tp_rank} num_tokens={num_tokens} "
-              f"non_zero={int(non_zero_mask.sum())} "
-              f"valid_indices[:5]={indices[non_zero_mask][:5].tolist()}",
-              file=_sys5.stderr, flush=True)
-        if not np.any(non_zero_mask):
+        # In the Ascend EP implementation, gating runs before EP
+        # dispatch, so all ranks have the same device_buffer data.
+        # Only TP0 needs to write to shared memory.
+        if self.tp_rank != 0:
             return
 
         with _file_lock(self._lock_file):
-            # Write only tokens with actual data on this EP rank.
-            valid_mask = (indices >= 0) & non_zero_mask
+            valid_mask = indices >= 0
             valid_indices = indices[valid_mask]
             valid_data = data[valid_mask]
 
