@@ -79,10 +79,17 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if self.tp_rank != 0:
             return
 
+        import sys as _sys6
         with _file_lock(self._lock_file):
             valid_mask = indices >= 0
             valid_indices = indices[valid_mask]
             valid_data = data[valid_mask]
+
+            print(f"[SAVE3] tp_rank={self.tp_rank} num_tokens={num_tokens} "
+                  f"valid={len(valid_indices)} "
+                  f"indices_range=[{indices.min()}, {indices.max()}] "
+                  f"valid_indices[:5]={valid_indices[:5].tolist()}",
+                  file=_sys6.stderr, flush=True)
 
             if len(valid_indices) > 0:
                 self._host_buffer_view[valid_indices, :, :] = valid_data
