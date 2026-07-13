@@ -73,6 +73,14 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
+        # Debug: count non-zero tokens in data
+        import sys
+        non_zero_count = int(np.any(data != 0, axis=(1, 2)).sum())
+        print(f"[SAVE] tp_rank={self.tp_rank} num_tokens={num_tokens} "
+              f"non_zero_data_tokens={non_zero_count} "
+              f"indices_min={indices.min()} indices_max={indices.max()}",
+              file=sys.stderr, flush=True)
+
         with _file_lock(self._lock_file):
             # Write routed_experts data using KV-slot indices.
             # Filter out -1 entries (padding / tokens without KV slots).
