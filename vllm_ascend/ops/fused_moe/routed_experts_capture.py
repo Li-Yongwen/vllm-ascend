@@ -60,17 +60,14 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         land on that rank.  All ranks must write their data so the
         scheduler sees every token's routed experts.
         """
+        import sys as _sys5
+        print(f"[SAVE-ENTER] tp_rank={self.tp_rank} indices_len={len(indices)}",
+              file=_sys5.stderr, flush=True)
         if self._lock_file is None:
-            import sys
-            print(f"[SAVE-EXIT] tp_rank={self.tp_rank} lock_file=None", file=sys.stderr, flush=True)
             return
         if self._host_buffer_view is None:
-            import sys
-            print(f"[SAVE-EXIT] tp_rank={self.tp_rank} host_buffer=None", file=sys.stderr, flush=True)
             return
         if self._device_buffer is None:
-            import sys
-            print(f"[SAVE-EXIT] tp_rank={self.tp_rank} device_buffer=None", file=sys.stderr, flush=True)
             return
 
         num_tokens = len(indices)
@@ -78,11 +75,10 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         # In EP mode, only write tokens that have non-zero data on this rank.
         non_zero_mask = np.any(data != 0, axis=(1, 2))
-        import sys
         print(f"[SAVE2] tp_rank={self.tp_rank} num_tokens={num_tokens} "
               f"non_zero={int(non_zero_mask.sum())} "
               f"valid_indices[:5]={indices[non_zero_mask][:5].tolist()}",
-              file=sys.stderr, flush=True)
+              file=_sys5.stderr, flush=True)
         if not np.any(non_zero_mask):
             return
 

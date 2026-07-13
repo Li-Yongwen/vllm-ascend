@@ -1680,9 +1680,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
                 capturer = AscendRoutedExpertsCapturer.get_instance()
-                import sys as _sys3
-                print(f"[CAPTURER] tp_rank={get_tensor_model_parallel_rank()} "
-                      f"capturer={capturer is not None}", file=_sys3.stderr, flush=True)
                 if capturer is not None:
                     capturer.clear_buffer()
             elif self.routed_experts_initialized:
@@ -2249,11 +2246,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
                 capturer = AscendRoutedExpertsCapturer.get_instance()
-                import sys as _sys4
-                print(f"[CAPTURER-SAVE] tp_rank={get_tensor_model_parallel_rank()} "
-                      f"capturer={capturer is not None} "
-                      f"slot_mapping={hasattr(self, 'cpu_slot_mapping') and self.cpu_slot_mapping is not None}",
-                      file=_sys4.stderr, flush=True)
                 if capturer is not None:
                     token_positions = getattr(self, 'cpu_positions', None)
                     num_reqs = self.input_batch.num_reqs
