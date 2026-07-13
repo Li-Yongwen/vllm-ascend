@@ -2855,6 +2855,8 @@ class NPUModelRunner(GPUModelRunner):
                             # scheduler reads from the same slot indices.
                             self.cpu_slot_mapping = computed_slots.copy()
                             import sys
+                            req_ids = self.input_batch.req_ids
+                            print(f"[W-SLOT] req_ids={req_ids[:10]}", file=sys.stderr, flush=True)
                             for ri in range(min(self.input_batch.num_reqs, 10)):
                                 mask = (req_row == ri)
                                 if mask.any():
