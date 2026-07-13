@@ -61,10 +61,16 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         scheduler sees every token's routed experts.
         """
         if self._lock_file is None:
+            import sys
+            print(f"[SAVE-EXIT] tp_rank={self.tp_rank} lock_file=None", file=sys.stderr, flush=True)
             return
         if self._host_buffer_view is None:
+            import sys
+            print(f"[SAVE-EXIT] tp_rank={self.tp_rank} host_buffer=None", file=sys.stderr, flush=True)
             return
         if self._device_buffer is None:
+            import sys
+            print(f"[SAVE-EXIT] tp_rank={self.tp_rank} device_buffer=None", file=sys.stderr, flush=True)
             return
 
         num_tokens = len(indices)
