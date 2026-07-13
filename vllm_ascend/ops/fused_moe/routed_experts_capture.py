@@ -45,6 +45,13 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         self._device_buffer[:n, layer_id, :] = topk_ids
 
+        if layer_id == 0 and self.tp_rank == 0:
+            import sys
+            print(f"[CAPTURE] tp_rank={self.tp_rank} layer={layer_id} "
+                  f"n={n} topk_ids[:2]={topk_ids[:2].cpu().tolist()} "
+                  f"nonzero={int((topk_ids != 0).any().item())}",
+                  file=sys.stderr, flush=True)
+
     def save_captured_experts(
         self,
         indices,  # np.ndarray
@@ -80,6 +87,11 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
             return
 
         import sys as _sys6
+        nz = int(np.any(data != 0, axis=(1, 2)).sum())
+        print(f"[SAVE-DATA] tp_rank={self.tp_rank} num_tokens={num_tokens} "
+              f"nonzero_tokens={nz} data[0,0,:2]={data[0,0,:2].tolist()} "
+              f"data[-1,0,:2]={data[-1,0,:2].tolist()}",
+              file=_sys6.stderr, flush=True)
         with _file_lock(self._lock_file):
             valid_mask = indices >= 0
             valid_indices = indices[valid_mask]
