@@ -45,13 +45,6 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         self._device_buffer[:n, layer_id, :] = topk_ids
 
-        if layer_id == 0 and self.tp_rank == 0:
-            import sys
-            print(f"[CAPTURE] tp_rank={self.tp_rank} layer={layer_id} "
-                  f"n={n} topk_ids[:2]={topk_ids[:2].cpu().tolist()} "
-                  f"nonzero={int((topk_ids != 0).any().item())}",
-                  file=sys.stderr, flush=True)
-
     def save_captured_experts(
         self,
         indices,  # np.ndarray
