@@ -2838,6 +2838,9 @@ class NPUModelRunner(GPUModelRunner):
                     # slot_mapping (compressed / padded) also get valid slots.
                     if positions_np is not None:
                         prepare_req_indices = getattr(self, '_prepare_req_indices', None)
+                        import sys
+                        print(f"[SLOT-PATH] positions_ok=True req_indices_ok={prepare_req_indices is not None} "
+                              f"num_tokens={num_tokens}", file=sys.stderr, flush=True)
                         if prepare_req_indices is not None:
                             blk_table = self.input_batch.block_table[kv_cache_gid]
                             block_size = blk_table.block_size
