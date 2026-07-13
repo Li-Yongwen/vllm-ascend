@@ -2783,6 +2783,9 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int, total_num_scheduled_tokens_compressed_list: list[int]):
+            import sys
+            print(f"[BTSM-ENTRY] kv_cache_gid={kv_cache_gid} num_tokens={num_tokens} num_reqs={num_reqs}",
+                  file=sys.stderr, flush=True)
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if self.pcp_size > 1:
