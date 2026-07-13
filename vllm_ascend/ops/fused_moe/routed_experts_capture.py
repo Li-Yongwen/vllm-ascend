@@ -72,14 +72,13 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         # In EP mode, only write tokens that have non-zero data on this rank.
         non_zero_mask = np.any(data != 0, axis=(1, 2))
-        if not np.any(non_zero_mask):
-            return
-
         import sys
         print(f"[SAVE2] tp_rank={self.tp_rank} num_tokens={num_tokens} "
               f"non_zero={int(non_zero_mask.sum())} "
               f"valid_indices[:5]={indices[non_zero_mask][:5].tolist()}",
               file=sys.stderr, flush=True)
+        if not np.any(non_zero_mask):
+            return
 
         with _file_lock(self._lock_file):
             # Write only tokens with actual data on this EP rank.
