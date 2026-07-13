@@ -2854,6 +2854,18 @@ class NPUModelRunner(GPUModelRunner):
                             # Use computed_slots for ALL tokens so that
                             # scheduler reads from the same slot indices.
                             self.cpu_slot_mapping = computed_slots.copy()
+                            import sys
+                            for ri in range(min(self.input_batch.num_reqs, 10)):
+                                mask = (req_row == ri)
+                                if mask.any():
+                                    pos = token_positions[mask]
+                                    bn = block_numbers[mask]
+                                    cs = computed_slots[mask]
+                                    print(f"[W-SLOT] req_idx={ri} block_size={block_size} "
+                                          f"pos[:3]={pos[:3].tolist()} "
+                                          f"block_num[:3]={bn[:3].tolist()} "
+                                          f"slots[:3]={cs[:3].tolist()}",
+                                          file=sys.stderr, flush=True)
                         else:
                             self.cpu_slot_mapping = slot_mapping_cpu
                     else:
