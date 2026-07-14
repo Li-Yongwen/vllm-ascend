@@ -27,7 +27,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute, _native_select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -235,7 +235,28 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             from vllm_ascend.ops.fused_moe.routed_experts_capture import AscendRoutedExpertsCapturer
             capturer = AscendRoutedExpertsCapturer.get_instance()
             if capturer is not None:
-                capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
+                # Capture *logical* expert IDs (before tid2eid remapping)
+                # so that all TP ranks produce the same topk_ids.
+                # The tid2eid remapping is EP-specific and varies per rank,
+                # which would cause each rank to capture different data.
+                if tid2eid is not None:
+                    _, logical_topk_ids = _native_select_experts(
+                        hidden_states=x,
+                        router_logits=router_logits,
+                        top_k=top_k,
+                        use_grouped_topk=use_grouped_topk,
+                        renormalize=renormalize,
+                        topk_group=topk_group,
+                        num_expert_group=num_expert_group,
+                        custom_routing_function=custom_routing_function,
+                        scoring_func=scoring_func,
+                        routed_scaling_factor=routed_scaling_factor,
+                        e_score_correction_bias=e_score_correction_bias,
+                        num_experts=num_logical_experts,
+                    )
+                else:
+                    logical_topk_ids = topk_ids
+                capturer.capture(layer_id=layer.layer_id, topk_ids=logical_topk_ids)
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(

@@ -19,12 +19,12 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     """
     Capturer for routed experts with device and optional shared memory buffer.
 
-    In the Ascend EP implementation, each TP/EP rank observes a different
-    subset of tokens after EP dispatch.  All ranks share the same named
-    shared memory buffer and write their portion of the routing data to
-    non-overlapping KV-slot indices.  The Reader on the scheduler side
-    reads from the same shared memory using globally-computed slot
-    mappings that cover tokens from all ranks.
+    In the Ascend EP implementation with FlashComm1 + tid2eid, each TP
+    rank computes different ``topk_ids`` because ``input_ids`` is
+    sharded across ranks.  The ``capture()`` call site in
+    ``w8a8_dynamic.apply()`` passes **logical** expert IDs (before
+    tid2eid remapping) which are identical across all ranks, so only
+    TP0 needs to write to shared memory.
 
     NOTE: ``capture()`` may be called inside ACL graph capture
     (dummy_run), so it must NOT contain collective communication
@@ -41,7 +41,7 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         """
         Capture expert routing decisions for a specific layer.
 
-        Simply stores the local ``topk_ids`` into ``device_buffer``.
+        Stores the local ``topk_ids`` into ``device_buffer``.
         No collective communication is performed here because this
         method may be called inside ACL graph capture.
         """
@@ -63,15 +63,9 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     ) -> None:
         """Save captured experts from device buffer to shared memory.
 
-        In EP mode each TP rank has ``device_buffer`` and ``indices``
-        for only its own subset of tokens.  Because the upstream
-        ``init_buffer`` creates shared memory on every rank (not just
-        TP0), all ranks can write their routing data to the
-        non-overlapping KV-slot indices in ``_host_buffer_view``.
-
-        However, ``_slot_mapping_view`` and ``_token_counts_view``
-        are read by the scheduler in token-order and must contain a
-        globally-consistent view, so only TP0 writes those.
+        Because ``capture()`` is called with logical expert IDs
+        (identical across all TP ranks), all ranks have the same
+        ``device_buffer`` data.  Only TP0 writes to shared memory.
         """
         if self._lock_file is None:
             return
@@ -80,14 +74,14 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if self._device_buffer is None:
             return
 
+        # All ranks have the same data; only TP0 writes to shared memory.
+        if self.tp_rank != 0:
+            return
+
         num_tokens = len(indices)
         data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
         with _file_lock(self._lock_file):
-            # All ranks write their routing data.  Each rank's
-            # ``indices`` contain distinct slot values (different
-            # tokens get different KV cache slots), so there is no
-            # overlap.
             valid_mask = indices >= 0
             valid_indices = indices[valid_mask]
             valid_data = data[valid_mask]
@@ -95,18 +89,14 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
             if len(valid_indices) > 0:
                 self._host_buffer_view[valid_indices, :, :] = valid_data
 
-            # Only TP0 writes the slot mapping and token counts
-            # because the Reader uses these in token-order and
-            # expects a globally-consistent view.
-            if self.tp_rank == 0:
-                if hasattr(self, '_slot_mapping_view') and self._slot_mapping_view is not None:
-                    self._slot_mapping_view[:num_tokens] = indices
+            if hasattr(self, '_slot_mapping_view') and self._slot_mapping_view is not None:
+                self._slot_mapping_view[:num_tokens] = indices
 
-                if (hasattr(self, '_token_counts_view')
-                        and self._token_counts_view is not None
-                        and token_counts_per_req is not None
-                        and num_reqs > 0):
-                    self._token_counts_view[:num_reqs] = token_counts_per_req[:num_reqs]
+            if (hasattr(self, '_token_counts_view')
+                    and self._token_counts_view is not None
+                    and token_counts_per_req is not None
+                    and num_reqs > 0):
+                self._token_counts_view[:num_reqs] = token_counts_per_req[:num_reqs]
 
         logger.debug(
             "[SAVE] tp_rank=%d num_tokens=%d valid=%d",
