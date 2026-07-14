@@ -20,12 +20,17 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     Capturer for routed experts with device and optional shared memory buffer.
 
     In the Ascend EP implementation, each TP/EP rank may observe a
-    different subset of tokens after EP dispatch.  The ``capture()``
-    method all-gathers ``topk_ids`` across TP ranks along the token
-    dimension so that every rank's ``device_buffer`` contains the
-    complete routing data.  Similarly, ``save_captured_experts()``
-    all-gathers the ``indices`` (slot_mapping) so that TP0 can write
-    every token's data to shared memory.
+    different subset of tokens after EP dispatch.  ``capture()``
+    stores each rank's local ``topk_ids`` into ``device_buffer``.
+    ``save_captured_experts()`` then all-gathers both the routing
+    data and the slot indices across TP ranks so that TP0 can write
+    every token's complete data to shared memory.
+
+    NOTE: ``capture()`` may be called inside ACL graph capture
+    (dummy_run), so it must NOT contain collective communication
+    operations like all-gather.  All cross-rank communication is
+    deferred to ``save_captured_experts()`` which runs outside the
+    capture path.
     """
 
     def __init__(self) -> None:
@@ -38,9 +43,9 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         """
         Capture expert routing decisions for a specific layer.
 
-        In EP mode each TP rank may have ``topk_ids`` for only a
-        subset of tokens.  We all-gather along dim=0 so every rank
-        has the complete routing data for all tokens in the batch.
+        Simply stores the local ``topk_ids`` into ``device_buffer``.
+        No collective communication is performed here because this
+        method may be called inside ACL graph capture.
         """
         if self._device_buffer is None:
             raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
@@ -49,14 +54,7 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        if self.tp_size > 1 and n > 0:
-            from vllm.distributed import get_tp_group
-            # All-gather along the token dimension so every rank has
-            # the complete topk_ids for all tokens.
-            gathered = get_tp_group().all_gather(topk_ids, dim=0)
-            self._device_buffer[:gathered.shape[0], layer_id, :] = gathered
-        else:
-            self._device_buffer[:n, layer_id, :] = topk_ids
+        self._device_buffer[:n, layer_id, :] = topk_ids
 
     def save_captured_experts(
         self,
@@ -67,10 +65,10 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     ) -> None:
         """Save captured experts from device buffer to shared memory.
 
-        After ``capture()`` all-gathers ``topk_ids``, every rank has
-        the complete routing data in ``device_buffer``.  We also
-        all-gather ``indices`` so that TP0 can write every token's
-        data to the correct shared memory slot.
+        In EP mode, each TP rank has ``device_buffer`` and ``indices``
+        for only its own subset of tokens.  We all-gather both the
+        routing data and the slot indices across TP ranks so that TP0
+        can write every token's complete data to shared memory.
         """
         if self._lock_file is None:
             return
@@ -81,21 +79,26 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
 
         num_tokens = len(indices)
 
-        # All-gather indices across TP ranks so TP0 has the complete
-        # slot mapping for all tokens, not just its own subset.
         if self.tp_size > 1 and num_tokens > 0:
             from vllm.distributed import get_tp_group
             tp_group = get_tp_group()
+
+            # All-gather indices across TP ranks along the token
+            # dimension so that TP0 has the complete slot mapping.
             indices_device = torch.tensor(
                 indices, dtype=torch.int32, device=self._device_buffer.device
             )
-            gathered_device = tp_group.all_gather(indices_device, dim=0)
-            all_indices = gathered_device.cpu().numpy()
+            all_indices = tp_group.all_gather(indices_device, dim=0).cpu().numpy()
+
+            # All-gather the routing data across TP ranks along the
+            # token dimension so that TP0 has the complete data.
+            local_data = self._device_buffer[:num_tokens, :, :]
+            all_data = tp_group.all_gather(local_data, dim=0).cpu().numpy()
         else:
             all_indices = indices
+            all_data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
 
         total_tokens = len(all_indices)
-        data = self._device_buffer[:total_tokens, :, :].cpu().numpy()
 
         # Only TP0 writes to shared memory.
         if self.tp_rank != 0:
@@ -104,7 +107,7 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         with _file_lock(self._lock_file):
             valid_mask = all_indices >= 0
             valid_indices = all_indices[valid_mask]
-            valid_data = data[valid_mask]
+            valid_data = all_data[valid_mask]
 
             if len(valid_indices) > 0:
                 self._host_buffer_view[valid_indices, :, :] = valid_data
@@ -116,15 +119,13 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
                     and self._token_counts_view is not None
                     and token_counts_per_req is not None
                     and num_reqs > 0):
-                # All-gather token_counts_per_req across TP ranks.
                 if self.tp_size > 1:
                     from vllm.distributed import get_tp_group
                     tc_t = torch.tensor(
                         token_counts_per_req, dtype=torch.int32,
                         device=self._device_buffer.device
                     )
-                    gathered_tc = get_tp_group().all_gather(tc_t, dim=0)
-                    all_tc = gathered_tc.cpu().numpy()
+                    all_tc = get_tp_group().all_gather(tc_t, dim=0).cpu().numpy()
                     total_reqs = len(all_tc)
                 else:
                     all_tc = token_counts_per_req
@@ -132,9 +133,9 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
                 self._token_counts_view[:total_reqs] = all_tc[:total_reqs]
 
         logger.debug(
-            "[SAVE] tp_rank=%d num_tokens=%d total_tokens=%d valid=%d",
+            "[SAVE] tp_rank=%d local_tokens=%d total_tokens=%d valid=%d",
             self.tp_rank,
             num_tokens,
             total_tokens,
-            len(valid_indices) if len(valid_indices) > 0 else 0,
+            int((all_indices >= 0).sum()),
         )
