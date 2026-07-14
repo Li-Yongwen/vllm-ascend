@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import torch
 from vllm.distributed.parallel_state import (
@@ -10,16 +12,20 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     _file_lock,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     """
     Capturer for routed experts with device and optional shared memory buffer.
 
-    In the Ascend EP implementation, gating runs *before* EP dispatch,
-    so every TP(EP) rank sees the full set of tokens and produces its
-    own topk_ids.  Only TP0 writes the data to shared memory using
-    KV-slot-based indexing.  The scheduler reads the slot_mapping from
-    shared memory (written by the worker) to locate each token's data.
+    In the Ascend EP implementation, each TP/EP rank may observe a
+    different subset of tokens after EP dispatch (e.g. when using
+    FlashComm1 + tid2eid).  The ``capture()`` method therefore
+    all-gathers ``topk_ids`` across TP ranks so that every rank's
+    ``device_buffer`` contains the complete routing data for all tokens.
+    Only TP0 writes the data to shared memory; the scheduler reads it
+    via ``RoutedExpertsReader`` using KV-slot-based indexing.
     """
 
     def __init__(self) -> None:
@@ -32,9 +38,11 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         """
         Capture expert routing decisions for a specific layer.
 
-        In the Ascend EP implementation, gating runs *before* EP dispatch,
-        so ``topk_ids`` contains all tokens in the batch regardless of which
-        EP rank we are on.  We simply store it into ``device_buffer``.
+        In EP mode, each TP rank may have ``topk_ids`` for only a
+        subset of tokens (after EP dispatch).  We all-gather
+        ``topk_ids`` across TP ranks so that every rank's
+        ``device_buffer`` holds the complete set of routing decisions.
+        Only TP0 later writes to shared memory.
         """
         if self._device_buffer is None:
             raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
@@ -43,7 +51,14 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        self._device_buffer[:n, layer_id, :] = topk_ids
+        if self.tp_size > 1 and n > 0:
+            from vllm.distributed import get_tp_group
+            # All-gather topk_ids across TP ranks so every rank has
+            # the complete routing data for all tokens in the batch.
+            gathered = get_tp_group().all_gather(topk_ids)
+            self._device_buffer[:gathered.shape[0], layer_id, :] = gathered
+        else:
+            self._device_buffer[:n, layer_id, :] = topk_ids
 
     def save_captured_experts(
         self,
@@ -54,15 +69,10 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
     ) -> None:
         """Save captured experts from device buffer to shared memory.
 
-        In the EP (Expert Parallelism) case, each TP/EP rank processes
-        a different subset of experts, so each rank has non-zero
-        ``device_buffer`` entries only for the tokens whose top-k experts
-        land on that rank.  All ranks must write their data so the
-        scheduler sees every token's routed experts.
+        After ``capture()`` all-gathers ``topk_ids``, every rank has the
+        same ``device_buffer`` data.  Only TP0 writes to shared memory
+        to avoid redundant writes.
         """
-        import sys as _sys5
-        print(f"[SAVE-ENTER] tp_rank={self.tp_rank} indices_len={len(indices)}",
-              file=_sys5.stderr, flush=True)
         if self._lock_file is None:
             return
         if self._host_buffer_view is None:
@@ -70,42 +80,34 @@ class AscendRoutedExpertsCapturer(RoutedExpertsCapturer):
         if self._device_buffer is None:
             return
 
-        num_tokens = len(indices)
-        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
-
-        # In the Ascend EP implementation, gating runs before EP
-        # dispatch, so all ranks have the same device_buffer data.
-        # Only TP0 needs to write to shared memory.
+        # After all-gather in capture(), all ranks have the same
+        # device_buffer data.  Only TP0 needs to write to shared memory.
         if self.tp_rank != 0:
             return
 
-        import sys as _sys6
-        nz = int(np.any(data != 0, axis=(1, 2)).sum())
-        print(f"[SAVE-DATA] tp_rank={self.tp_rank} num_tokens={num_tokens} "
-              f"nonzero_tokens={nz} data[0,0,:2]={data[0,0,:2].tolist()} "
-              f"data[-1,0,:2]={data[-1,0,:2].tolist()}",
-              file=_sys6.stderr, flush=True)
+        num_tokens = len(indices)
+        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
+
         with _file_lock(self._lock_file):
             valid_mask = indices >= 0
             valid_indices = indices[valid_mask]
             valid_data = data[valid_mask]
 
-            print(f"[SAVE3] tp_rank={self.tp_rank} num_tokens={num_tokens} "
-                  f"valid={len(valid_indices)} "
-                  f"indices_range=[{indices.min()}, {indices.max()}] "
-                  f"valid_indices[:5]={valid_indices[:5].tolist()}",
-                  file=_sys6.stderr, flush=True)
-
             if len(valid_indices) > 0:
                 self._host_buffer_view[valid_indices, :, :] = valid_data
 
-            # Only TP0 writes metadata (slot_mapping, token_counts).
-            if self.tp_rank == 0:
-                if hasattr(self, '_slot_mapping_view') and self._slot_mapping_view is not None:
-                    self._slot_mapping_view[:num_tokens] = indices
+            if hasattr(self, '_slot_mapping_view') and self._slot_mapping_view is not None:
+                self._slot_mapping_view[:num_tokens] = indices
 
-                if (hasattr(self, '_token_counts_view')
-                        and self._token_counts_view is not None
-                        and token_counts_per_req is not None
-                        and num_reqs > 0):
-                    self._token_counts_view[:num_reqs] = token_counts_per_req[:num_reqs]
+            if (hasattr(self, '_token_counts_view')
+                    and self._token_counts_view is not None
+                    and token_counts_per_req is not None
+                    and num_reqs > 0):
+                self._token_counts_view[:num_reqs] = token_counts_per_req[:num_reqs]
+
+        logger.debug(
+            "[SAVE] tp_rank=%d num_tokens=%d valid=%d",
+            self.tp_rank,
+            num_tokens,
+            len(valid_indices) if len(valid_indices) > 0 else 0,
+        )
